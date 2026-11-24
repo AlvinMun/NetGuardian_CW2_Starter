@@ -1,0 +1,20 @@
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[font=\scriptsize,node distance=5mm,
+  box/.style={draw,rounded corners,align=center,minimum width=35mm,minimum height=7mm,fill=blue!7},
+  decision/.style={draw,diamond,aspect=2,align=center,inner sep=1pt,fill=yellow!15},
+  arr/.style={-{Latex},thick}]
+  \node[box] (pkt) {h8 TCP packet-in to h7};
+  \node[box,below=of pkt] (tuple) {Build five-tuple; ignore repeats};
+  \node[decision,below=of tuple] (rate) {Rate $>$ threshold?};
+  \node[box,below left=7mm and 2mm of rate] (normal) {Log observation\\continue forwarding};
+  \node[box,below right=7mm and 2mm of rate] (drop) {Log alert; install\\priority-500 timed drop};
+  \node[box,below=17mm of rate] (expire) {Rule expires; h8 is restored};
+  \draw[arr] (pkt)--(tuple); \draw[arr] (tuple)--(rate);
+  \draw[arr] (rate)--node[above left]{no}(normal);
+  \draw[arr] (rate)--node[above right]{yes}(drop);
+  \draw[arr] (drop)--(expire);
+\end{tikzpicture}
+\caption{New-flow detection and timeout-based recovery.}
+\label{fig:ids}
+\end{figure}
