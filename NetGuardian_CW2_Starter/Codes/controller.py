@@ -8,20 +8,29 @@ Environment variables:
 """
 import os
 import time
+import csv
+import sys
+from datetime import datetime, timezone
 from collections import defaultdict
+from pathlib import Path
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ipv4, tcp, ether_types
 from ryu.lib import hub
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from flow_detection import FlowRateDetector
 
 H8_IP = "10.0.3.99"
 H7_IP = "10.0.3.40"
 FLOW_WINDOW = float(os.getenv("NG_FLOW_WINDOW", "5"))
 FLOW_THRESHOLD = float(os.getenv("NG_FLOW_THRESHOLD", "4"))
 MITIGATION_TIMEOUT = int(os.getenv("NG_MITIGATION_TIMEOUT", "15"))
+SECURITY_LOG = Path(os.getenv("NG_SECURITY_LOG", "data/security_events.csv"))
 IDLE_TIMEOUT = 5
+if MITIGATION_TIMEOUT <= 0:
+    raise ValueError("NG_MITIGATION_TIMEOUT must be positive")
 
 class NetGuardianController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -29,10 +38,13 @@ class NetGuardianController(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.mac_to_port = defaultdict(dict)
-        self.window_started = time.monotonic()
-        self.window_flows = set()
+        self.flow_detector = FlowRateDetector(FLOW_WINDOW, FLOW_THRESHOLD)
         self.mitigation_until = 0
         self.datapaths = {}
+        self.packet_in_flows = {}
+        self.previous_h8_flows = set()
+        self.pending_flow_stats = defaultdict(list)
+        self.stats_thread = hub.spawn(self.request_flow_stats)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features(self, ev):
@@ -45,13 +57,68 @@ class NetGuardianController(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER,
                                           ofp.OFPCML_NO_BUFFER)]
         self.add_flow(dp, 0, match, actions, idle_timeout=0)
+        # h6 and h7 are both attached to s3 (DPID 3), so enforce the guest
+        # policy before the first guest packet can be forwarded.
+        if dp.id == 3:
+            self.drop_ipv4(dp, "10.0.3.31", H7_IP, priority=400)
         self.logger.info("Switch %s connected using OpenFlow 1.3", dp.id)
+
+    def request_flow_stats(self):
+        """Poll s3 so IDS counts packet-in candidates confirmed in switch state."""
+        while True:
+            for dp in list(self.datapaths.values()):
+                if dp.id != 3:
+                    continue
+                parser, ofp = dp.ofproto_parser, dp.ofproto
+                request = parser.OFPFlowStatsRequest(
+                    datapath=dp, flags=0, table_id=ofp.OFPTT_ALL,
+                    out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                    cookie=0, cookie_mask=0, match=parser.OFPMatch())
+                dp.send_msg(request)
+            hub.sleep(1)
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def flow_stats_reply(self, ev):
+        msg, dp = ev.msg, ev.msg.datapath
+        body = self.pending_flow_stats[dp.id]
+        body.extend(msg.body)
+        if msg.flags & dp.ofproto.OFPMPF_REPLY_MORE:
+            return
+        self.pending_flow_stats[dp.id] = []
+        if dp.id != 3:
+            return
+
+        now = time.monotonic()
+        observed = {flow: stamp for flow, stamp in self.packet_in_flows.items()
+                    if now - stamp <= FLOW_WINDOW}
+        self.packet_in_flows = observed
+        current = {}
+        for stat in body:
+            match = stat.match
+            if (match.get("ipv4_src") != H8_IP or
+                    match.get("ipv4_dst") != H7_IP or
+                    match.get("ip_proto") != 6 or
+                    match.get("tcp_src") is None or
+                    match.get("tcp_dst") is None):
+                continue
+            flow = (H8_IP, H7_IP, match.get("tcp_src"),
+                    match.get("tcp_dst"), 6)
+            current[flow] = stat
+
+        new_flows = set(current) - self.previous_h8_flows
+        active_count = len(current)
+        for flow in new_flows:
+            packet_in_time = self.packet_in_flows.pop(flow, None)
+            if packet_in_time is not None and now - packet_in_time <= FLOW_WINDOW:
+                self.check_new_flow_rate(dp, flow, active_count)
+        self.previous_h8_flows = set(current)
 
     def add_flow(self, dp, priority, match, actions, idle_timeout=IDLE_TIMEOUT,
                  hard_timeout=0):
         ofp = dp.ofproto
         parser = dp.ofproto_parser
-        instructions = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+        instructions = ([parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+                        if actions else [])
         mod = parser.OFPFlowMod(datapath=dp, priority=priority, match=match,
                                 instructions=instructions,
                                 idle_timeout=idle_timeout,
@@ -68,24 +135,50 @@ class NetGuardianController(app_manager.RyuApp):
         return (ip_pkt.src, ip_pkt.dst, tcp_pkt.src_port,
                 tcp_pkt.dst_port, 6)
 
-    def check_new_flow_rate(self, dp, flow):
-        now = time.monotonic()
-        elapsed = now - self.window_started
-        # Evaluate a completed observation window, rather than dividing by a
-        # near-zero elapsed time (which would falsely alert on the first flow).
-        if elapsed >= FLOW_WINDOW:
-            rate = len(self.window_flows) / elapsed
-            if rate > FLOW_THRESHOLD and time.time() >= self.mitigation_until:
-                self.mitigation_until = time.time() + MITIGATION_TIMEOUT
-                self.drop_ipv4(dp, H8_IP, H7_IP, priority=500,
-                               hard_timeout=MITIGATION_TIMEOUT)
-                self.logger.warning(
-                    "SECURITY_ALERT timestamp=%.3f source=%s measured_rate=%.2f "
-                    "flows_per_second threshold=%.2f mitigation_timeout=%s",
-                    time.time(), H8_IP, rate, FLOW_THRESHOLD, MITIGATION_TIMEOUT)
-            self.window_flows.clear()
-            self.window_started = now
-        self.window_flows.add(flow)
+    def log_security_event(self, flow, observation, detected, active_flows):
+        """Append every packet-in flow confirmed by an OpenFlow stats reply."""
+        SECURITY_LOG.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not SECURITY_LOG.exists() or SECURITY_LOG.stat().st_size == 0
+        with SECURITY_LOG.open("a", newline="") as event_file:
+            writer = csv.writer(event_file)
+            if write_header:
+                writer.writerow(("timestamp_utc", "source_host", "source_ip",
+                                 "destination_ip", "source_port", "destination_port",
+                                 "protocol", "window_seconds", "new_flows_in_window",
+                                 "measured_flows_per_second", "threshold_flows_per_second",
+                                 "active_h8_h7_flows", "alert", "action"))
+            writer.writerow((
+                datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "h8", flow[0], flow[1], flow[2], flow[3], flow[4],
+                observation.window_seconds, observation.flow_count,
+                "{:.3f}".format(observation.measured_rate),
+                "{:.3f}".format(observation.threshold),
+                active_flows,
+                str(observation.suspicious).lower(),
+                "DROP_REQUESTED" if detected else "OBSERVED",
+            ))
+
+    def check_new_flow_rate(self, dp, flow, active_flows):
+        observation = self.flow_detector.observe(flow, time.monotonic())
+        if observation is None:
+            return False
+
+        now = time.time()
+        detected = observation.suspicious and now >= self.mitigation_until
+        if detected:
+            self.mitigation_until = now + MITIGATION_TIMEOUT
+            self.drop_ipv4(dp, H8_IP, H7_IP, priority=500,
+                           hard_timeout=MITIGATION_TIMEOUT)
+            self.log_security_event(flow, observation, True, active_flows)
+            self.logger.warning(
+                "SECURITY_ALERT timestamp=%.3f source_host=h8 source_ip=%s "
+                "measured_rate=%.2f flows_per_second threshold=%.2f "
+                "new_flows=%s window_seconds=%.2f mitigation_timeout=%s",
+                now, H8_IP, observation.measured_rate, FLOW_THRESHOLD,
+                observation.flow_count, FLOW_WINDOW, MITIGATION_TIMEOUT)
+            return True
+        self.log_security_event(flow, observation, False, active_flows)
+        return False
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in(self, ev):
@@ -114,15 +207,12 @@ class NetGuardianController(app_manager.RyuApp):
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         tcp_pkt = pkt.get_protocol(tcp.tcp)
-        if ip_pkt and ip_pkt.src == "10.0.3.31" and ip_pkt.dst == H7_IP:
-            # Permanent guest-to-protected-server policy deny.
-            self.drop_ipv4(dp, ip_pkt.src, ip_pkt.dst, priority=400)
-            return
-
         if ip_pkt and tcp_pkt:
             flow = self.five_tuple(ip_pkt, tcp_pkt)
             if ip_pkt.src == H8_IP and ip_pkt.dst == H7_IP:
-                self.check_new_flow_rate(dp, flow)
+                # The later s3 flow-stat reply confirms whether this Packet_In
+                # resulted in a five-tuple forwarding entry before it is counted.
+                self.packet_in_flows[flow] = time.monotonic()
                 # Do not forward the packet that completes a triggering window.
                 if time.time() < self.mitigation_until:
                     return

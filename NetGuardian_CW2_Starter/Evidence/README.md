@@ -1,46 +1,23 @@
-# Evidence checklist — use real screenshots/logs from the module Ubuntu VM
+# VM evidence checklist
 
-## Task 1
-- [ ] `nodes`, `net`, `dump` showing c0, s1-s3, h1-h8 and links
-- [ ] `pingall` result
-- [ ] s1-s3 connected to Ryu
-- [ ] OpenFlow 1.3 confirmed on all switches
-- [ ] `ovs-ofctl dump-flows` showing installed rules
+Keep original, readable evidence from the module Ubuntu VM in
+`Codes/Evidence/` (this root checklist is not a submission artifact). Do not make
+screenshots or CSV rows that imply a test was run when it was not. The coursework
+ZIP must have exactly three top-level folders (`Codes`, `Report`, `Video`);
+incorporate the required evidence into the report and video or keep supporting
+files inside one of those folders before packaging.
 
-## Task 2
-- [ ] At least one authorized host reaches h7
-- [ ] h6 -> h7 blocked
-- [ ] h6 reaches a non-protected host
-- [ ] Controller log shows MAC learning
-- [ ] Forwarding and h6 -> h7 DROP rules visible
-- [ ] Dynamic forwarding entries show idle_timeout=5
-- [ ] Table-miss remains after dynamic entries expire
+- `Task1`: `nodes`, `net`, `dump`, full `pingall` under `learning_switch.py`,
+  switch/controller connection, OpenFlow 1.3, and installed flow rules.
+- `Task2`: authorized host to h7, h6 to h7 denied, h6 to a non-protected host,
+  MAC learning, forwarding and policy rules, five-second idle timeout, and the
+  table-miss rule after dynamic entries expire.
+- `Task3`: ICMP, normal TCP, high-rate h8 TCP, flow/port CSVs, active-flow
+  graph, and traffic-volume graph.
+- `Task4`: low-rate no-alert, high-rate alert with measured rate and threshold,
+  timed priority-500 rule, legitimate traffic during mitigation, h8 recovery,
+  and `security_events.csv`.
+- `Task5`: integrated run transcript and five independently measured rows with
+  means for RTT, active flows, detection time, and mitigation response.
 
-## Task 3
-- [ ] ICMP generation
-- [ ] Normal TCP generation
-- [ ] Controlled high-rate TCP from h8 to h7
-- [ ] Flow statistics and port statistics
-- [ ] flow_stats.csv and port_stats.csv
-- [ ] active_flows.png and traffic_volume.png
-- [ ] Short normal/high-rate traffic comparison
-
-## Task 4
-- [ ] Low-rate h8 traffic does not trigger alert
-- [ ] High-rate h8 traffic triggers alert
-- [ ] Measured new-flow rate and threshold shown
-- [ ] Security alert includes timestamp, source, rate and threshold
-- [ ] High-priority DROP rule visible
-- [ ] h8 -> h7 blocked during mitigation
-- [ ] Legitimate host -> h7 still works
-- [ ] h8 -> h7 restored after timeout
-- [ ] security_events.csv
-
-## Task 5
-- [ ] One integrated demonstration of Tasks 1-4
-- [ ] Five independent performance runs
-- [ ] Four metrics recorded for every run
-- [ ] Mean of each metric
-- [ ] Discussion of variation
-
-Use screenshots with readable terminal output and timestamps. Keep originals.
+The currently bundled `PLACE_REAL_EVIDENCE_HERE.txt` files are reminders only.

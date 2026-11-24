@@ -41,7 +41,7 @@ def build():
 def main():
     net = build()
     try:
-        info("*** NetGuardian topology started. Use nodes, net, dump, pingall.\\n")
+        info("*** NetGuardian topology started. Use nodes, net, dump, pingall.\n")
         CLI(net)
     finally:
         net.stop()
