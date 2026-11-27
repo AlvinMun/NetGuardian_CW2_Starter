@@ -1,151 +1,198 @@
-# NetGuardian — CSI201 Coursework II
+# CSI201 CW2 - NetGuardian team run guide
 
-This folder contains the coursework implementation and its VM test workflow.
-The brief requires Ubuntu, Mininet, Ryu, and Open vSwitch from the module VM.
-No extra Python packages are needed by the submitted code. The VM tests and
-performance measurements must be run there before the report is finalised.
+Extract the source package in the course Ubuntu virtual machine. Keep the
+entire `Codes` folder together. Open two terminals and change to the `Codes`
+directory in both. Follow the lab startup sequence and then run the CW2 checks
+below.
 
-The topology follows Fig. 1 and Table 1 of the brief: controller `c0` at
-`127.0.0.1:6633`, switches `s1`–`s3`, and hosts `h1`–`h8`. Task 1 uses a
-policy-free learning switch; the NetGuardian controller enforces the Task 2
-guest restriction and therefore intentionally blocks `h6 -> h7`.
+## Task 1 - Verify the topology
 
-## Task 1: topology and full connectivity
-
-Open two Ubuntu terminals. In terminal 1, from `Codes`:
+Start the lab's basic learning-switch controller in terminal 1.
 
 ```bash
-ryu-manager learning_switch.py
+ryu-manager --ofp-tcp-listen-port 6633 ryu.app.simple_switch_13
 ```
 
-In terminal 2:
+Once Ryu has started, launch the topology in terminal 2.
 
 ```bash
-cd ~/NetGuardian_CW2_Starter/Codes
 sudo python3 topology.py
 ```
 
-At the Mininet prompt, capture the required evidence:
+At the `mininet>` prompt, enter these commands one at a time.
 
 ```text
 nodes
 net
 dump
 pingall
-sh ovs-vsctl get Bridge s1 protocols
-sh ovs-vsctl get Bridge s2 protocols
-sh ovs-vsctl get Bridge s3 protocols
-sh ovs-ofctl -O OpenFlow13 dump-flows s1
-sh ovs-ofctl -O OpenFlow13 dump-flows s2
-sh ovs-ofctl -O OpenFlow13 dump-flows s3
 ```
 
-`pingall` should have no loss in this Task 1 run. Save genuine screenshots in
-`Codes/Evidence/Task1`. Exit Mininet with `exit` and stop the learning controller with
-Ctrl+C before starting Task 2.
-
-## Tasks 2–4: NetGuardian controller
-
-In terminal 1, from `Codes`:
+Expect eight hosts, three switches, and 0% packet loss. In terminal 3, check
+the flow table, controller connection status, and bridge protocol.
 
 ```bash
-NG_FLOW_WINDOW=5 NG_FLOW_THRESHOLD=4 NG_MITIGATION_TIMEOUT=15 ryu-manager controller.py
+sudo ovs-ofctl -O OpenFlow13 dump-flows s1
+sudo ovs-vsctl --columns=target,is_connected list Controller
+sudo ovs-vsctl get Bridge s1 protocols
 ```
 
-In terminal 2, start `sudo python3 topology.py`. Test at the Mininet prompt:
+Replace `s1` with `s2` or `s3` to inspect the other switches. Before moving to the
+next task, enter `exit` at the `mininet>` prompt, then press `Ctrl+C` in terminal 1
+to stop Ryu. Use the basic learning switch for the Task 1 connectivity check.
 
-```text
-h1 ping -c 3 10.0.3.40
-h6 ping -c 3 10.0.3.40
-h6 ping -c 3 10.0.1.11
-sh ovs-ofctl -O OpenFlow13 dump-flows s3
-sh sleep 6
-sh ovs-ofctl -O OpenFlow13 dump-flows s3
-```
+## Task 2 - Test access policies
 
-Expected: h1 reaches h7, h6 cannot reach h7, h6 can reach h1, and dynamic
-forwarding entries expire after five idle seconds while the table-miss and
-guest policy entries remain. The guest policy is installed on s3 at controller
-connection time; the IDS rule has priority 500 and a finite hard timeout.
-
-## Task 3: traffic and monitoring
-
-With Mininet running, start the service from its prompt:
-
-```text
-h7 python3 -m http.server 5001 &
-```
-
-In another Ubuntu terminal, from `Codes`, start monitoring:
+Start the project controller in terminal 1.
 
 ```bash
-sudo python3 monitoring.py --interval 1 --duration 60 --out data
+ryu-manager --ofp-tcp-listen-port 6633 controller.py
 ```
 
-At the Mininet prompt, generate the required traffic:
-
-```text
-h1 python3 traffic_generator.py --mode icmp --destination 10.0.3.40 --rate 1 --duration 10
-h1 python3 traffic_generator.py --mode tcp --destination 10.0.3.40 --port 5001 --rate 2 --duration 10
-h8 python3 traffic_generator.py --mode tcp --destination 10.0.3.40 --port 5001 --rate 1 --duration 10
-```
-
-Collect `flow_stats.csv`, `port_stats.csv`, `active_flows.svg` (and PNG when
-Matplotlib is already present), and `traffic_volume.svg` (and PNG when
-available), and retain the generator output. Compare the normal and
-low-rate trials with the high-rate trial below.
-
-## Task 4: detection, block, and recovery
-
-The controller polls s3 flow statistics once per second and confirms each new
-packet-in five-tuple against the switch table before counting it. The default
-detector uses a five-second rolling window and flags more than four distinct
-h8-to-h7 TCP five-tuples per second. Thus 20 flows in the window is not an
-alert; the 21st distinct flow exceeds the threshold. Every newly
-observed h8-to-h7 tuple is appended to `data/security_events.csv`, including
-non-alert observations. After the low-rate run above, leave a five-second quiet
-gap so its tuples age out, then run:
-
-```text
-h8 python3 traffic_generator.py --mode tcp --destination 10.0.3.40 --port 5001 --rate 8 --duration 10
-```
-
-During the mitigation timeout, verify `h8 -> h7` is blocked while `h1 -> h7`
-still works. After 15 seconds, verify h8 can reach h7 again. Inspect
-`security_events.csv`, the Ryu `SECURITY_ALERT` log, and `s3` flow table. Save
-real evidence in `Codes/Evidence/Task4`.
-
-## Task 5: integrated VM run and five measurements
-
-The live runner starts Ryu and the Mininet topology, exercises the policies,
-normal and low-rate traffic, then performs five separate high-rate detection,
-mitigation, and recovery trials. It records the measured RTT, active flows,
-detection time, and mitigation response time; it also starts monitoring and
-saves the controller log. Run from `Codes` in the module Ubuntu VM:
+Launch the topology in terminal 2.
 
 ```bash
-sudo python3 experiment.py --live
+sudo python3 topology.py
 ```
 
-Each invocation writes uniquely named outputs under `data` and a transcript
-under `Codes/Evidence/Task5`; it does not reuse example measurements. Keep the five
-result rows and their calculated means for the report.
+Test the three paths at the `mininet>` prompt.
 
-The detector unit tests use Python's standard library and can run in the VM:
+```text
+h1 ping -c 3 h7
+h6 ping -c 1 -W 1 h7
+h6 ping -c 3 h5
+```
+
+The first and third pings should succeed. The second should be blocked.
+Look for MAC learning messages in terminal 1. Have the following command ready
+in terminal 3 and run it as soon as the last ping finishes.
 
 ```bash
-cd ~/NetGuardian_CW2_Starter/Codes
-python3 -m unittest -v test_flow_detection.py test_monitoring_graph.py test_experiment.py
+sudo ovs-ofctl -O OpenFlow13 dump-flows s3
 ```
 
-## Report, video, and final ZIP
+Run the command again after about six seconds. Verify that the learned ICMP
+forwarding entries have expired after their five-second idle timeout and that
+the table-miss entry and the permanent guest DROP rule are still present.
+The CW2 specification names the policy controller `controller.py`.
 
-The report still needs actual VM versions, all five measured rows, team member
-names/IDs, and contribution percentages. Do not submit estimated or sample
-measurements. The video plan is in `Video/VIDEO_PLAN.md`; every actual team
-member must appear and explain their own part. Generated CSVs, graphs, and
-Task 5 logs are saved under `Codes/data` and `Codes/Evidence`, so they can be
-included with the source. Put final screenshots and the real recording inside
-the three required folders before packaging. The final ZIP must contain exactly
-`Codes`, `Report`, and `Video` at its top level and use the team-name filename
-from the brief.
+## Task 3 - Generate traffic and inspect the monitoring results
+
+In terminal 1, start Ryu with automatic mitigation disabled so the full
+controlled workload can run while the controller collects statistics.
+
+```bash
+NG_MITIGATE=0 ryu-manager --ofp-tcp-listen-port 6633 controller.py
+```
+
+Once Ryu has started, run `sudo python3 topology.py` in terminal 2 as before.
+
+At the `mininet>` prompt, start the TCP service on `h7` and run the three traffic
+experiments in order.
+
+```text
+h7 python3 traffic_generator.py serve >/tmp/netguardian-h7.log 2>&1 &
+h7 cat /tmp/netguardian-h7.log
+h1 python3 traffic_generator.py generate icmp --source=h1 --destination=h7 --rate=1 --duration=3
+h1 python3 traffic_generator.py generate tcp --source=h1 --destination=h7 --rate=1 --duration=3
+h8 python3 traffic_generator.py generate tcp --source=h8 --destination=h7 --rate=5 --duration=4.5
+h7 kill $!
+exit
+```
+
+The controller prints its `Results directory` in terminal 1 at startup. After
+stopping Ryu, run the following command from `Codes`. Replace `run-XXXXXX` with
+the actual directory name to generate the two SVG monitoring plots.
+
+```bash
+python3 monitoring.py controller-output/run-XXXXXX
+```
+
+## Task 4 - Observe the alert, temporary DROP rule, and recovery
+
+Start the project controller in terminal 1. Detection and automatic mitigation
+are enabled by default.
+
+```bash
+ryu-manager --ofp-tcp-listen-port 6633 controller.py
+```
+
+Once Ryu has started, launch the topology in terminal 2.
+
+```bash
+sudo python3 topology.py
+```
+
+Run the low-rate test first at the `mininet>` prompt.
+
+```text
+h7 python3 traffic_generator.py serve >/tmp/netguardian-h7.log 2>&1 &
+h8 python3 traffic_generator.py generate tcp --source=h8 --destination=h7 --rate=1 --duration=3
+```
+
+The low-rate traffic should pass. In terminal 3, start refreshing the `s3` flow
+table so you can see the temporary DROP rule with priority 200 when it appears.
+
+```bash
+sudo watch -n 0.5 ovs-ofctl -O OpenFlow13 dump-flows s3
+```
+
+At the `mininet>` prompt, start continuous pings from both hosts, then run the
+controlled TCP health-check workload.
+
+```text
+h1 ping -D -i 0.5 -c 31 h7 >/tmp/netguardian-h1-ping.log 2>&1 &
+h8 ping -D -i 0.5 -c 31 h7 >/tmp/netguardian-h8-ping.log 2>&1 &
+h8 python3 traffic_generator.py generate tcp --source=h8 --destination=h7 --rate=5 --duration=4.5
+```
+
+Terminal 1 shows `ALERT`, `DROP confirmed`, and `DROP removed`. The controller saves
+these events in `security_events.csv` in the `Results directory`. Check `h8`
+connectivity again after the rule expires.
+
+```text
+h8 ping -c 3 h7
+h7 kill $!
+exit
+```
+
+## Task 5 - Run the integrated demo and five performance trials
+
+Stop any manually started Mininet and Ryu processes. Run the integrated
+evaluation from the `Codes` directory.
+
+```bash
+sudo python3 Experiment.py --mode evaluation --output ~/CW2/results/Task5
+```
+
+The demo subdirectory contains the integrated demonstration results.
+The `performance.csv` file lists the metrics for all five trials and their
+averages.
+
+## Optional - Record a terminal session or automate individual checks
+
+Each time you start `controller.py` directly, it saves CSV files in
+`Codes/controller-output/run-*` and prints the actual path. To record the
+Mininet session for Task 1, replace the terminal 2 launch command with the
+command below. Enter the same lab commands at the `mininet>` prompt.
+
+```bash
+script -q -f -c 'sudo python3 topology.py' ~/Task1-mininet.log
+```
+
+Use the separate-terminal steps above for a live demonstration. Use these
+commands to run individual checks automatically. Choose a new output
+directory for each run, and run one check at a time in the same virtual machine.
+
+```bash
+sudo python3 Experiment.py --mode topology   --output ~/CW2/results/Task1
+sudo python3 Experiment.py --mode policy     --output ~/CW2/results/Task2
+sudo python3 Experiment.py --mode monitoring --output ~/CW2/results/Task3
+sudo python3 Experiment.py --mode security   --output ~/CW2/results/Task4
+```
+
+If Python 3 reports `No module named 'mininet'`, check that Mininet is configured
+for Python 3 in the course Ubuntu virtual machine. Share the source package
+within your registered team. For the final submission, package `Codes` with
+your team's `Report` and `Video` folders and follow the coursework naming
+requirements.
